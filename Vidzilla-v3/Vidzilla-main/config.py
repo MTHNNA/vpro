@@ -10,26 +10,47 @@ TEMP_DIRECTORY  = os.path.join(BASE_DIR, "temp_videos")
 COOKIES_FILE    = os.path.join(BASE_DIR, "cookies.txt")
 COOKIES_ENABLED = os.path.exists(COOKIES_FILE)
 
+# ─── Bot settings ─────────────────────────────────────────────────────────────
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_MODE  = os.getenv("BOT_MODE", "polling").strip().lower()
 
+# ─── Server ───────────────────────────────────────────────────────────────────
 PORT = int(os.getenv("PORT", "7860"))
 HOST = os.getenv("HOST", "0.0.0.0")
 
+# ─── Webhook ──────────────────────────────────────────────────────────────────
 WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/webhook")
 WEBHOOK_URL  = os.getenv("WEBHOOK_URL", "")
 
+# ─── MongoDB ──────────────────────────────────────────────────────────────────
 MONGODB_URI              = os.getenv("MONGODB_URI")
-MONGODB_DB_NAME          = os.getenv("MONGODB_DB_NAME")
-MONGODB_USERS_COLLECTION = os.getenv("MONGODB_USERS_COLLECTION")
+MONGODB_DB_NAME          = os.getenv("MONGODB_DB_NAME", "vidzilla")
+MONGODB_USERS_COLLECTION = os.getenv("MONGODB_USERS_COLLECTION", "users")
 
+# ─── Admin ────────────────────────────────────────────────────────────────────
 ADMIN_IDS = list(map(int, filter(None, os.getenv("ADMIN_IDS", "").split(","))))
+
+# ─── Validation ───────────────────────────────────────────────────────────────
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN is not set!")
+
+if BOT_MODE not in {"webhook", "polling"}:
+    import logging
+    logging.warning("⚠️ Unknown BOT_MODE=%s. Falling back to 'polling'.", BOT_MODE)
+    BOT_MODE = "polling"
+
+if BOT_MODE == "webhook" and not WEBHOOK_URL:
+    raise ValueError("❌ WEBHOOK_URL is required when BOT_MODE=webhook")
+
+if not MONGODB_URI:
+    import logging
+    logging.warning("⚠️ MONGODB_URI is not set — database features will be disabled.")
 
 # ─── Telegram limits ──────────────────────────────────────────────────────────
 TELEGRAM_VIDEO_LIMIT_MB = 50
-TELEGRAM_FILE_LIMIT_MB  = 2000   # Telegram Premium / Bot API limit
+TELEGRAM_FILE_LIMIT_MB  = 2000
 
-# ─── Supported platforms (ordered: specific paths before domain) ──────────────
+# ─── Supported platforms ──────────────────────────────────────────────────────
 PLATFORM_IDENTIFIERS = {
     # YouTube
     "youtube.com/shorts"    : "YouTube",
@@ -79,7 +100,7 @@ PLATFORM_IDENTIFIERS = {
     "snapchat.com/spotlight": "Snapchat",
     "snapchat.com"          : "Snapchat",
     "t.snapchat.com"        : "Snapchat",
-    # Threads (Meta)
+    # Threads
     "threads.net"           : "Threads",
     # LinkedIn
     "linkedin.com"          : "LinkedIn",
@@ -89,7 +110,7 @@ PLATFORM_IDENTIFIERS = {
     # Bilibili
     "bilibili.com"          : "Bilibili",
     "b23.tv"                : "Bilibili",
-    # SoundCloud (audio)
+    # SoundCloud
     "soundcloud.com"        : "SoundCloud",
     "on.soundcloud.com"     : "SoundCloud",
     # Google Drive
@@ -97,13 +118,13 @@ PLATFORM_IDENTIFIERS = {
     # Dropbox
     "dropbox.com"           : "Dropbox",
     "dl.dropboxusercontent.com": "Dropbox",
-    # Generic direct links
+    # Others
     "coub.com"              : "Coub",
     "ok.ru"                 : "Odnoklassniki",
     "vk.com"                : "VK",
 }
 
-# Human-readable emoji per platform
+# ─── Platform emoji ───────────────────────────────────────────────────────────
 PLATFORM_EMOJI = {
     "YouTube"       : "▶️",
     "Instagram"     : "📸",
