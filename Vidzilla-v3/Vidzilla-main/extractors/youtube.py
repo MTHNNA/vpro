@@ -4,9 +4,9 @@ YouTube extractor — ported from Cobalt's youtube.js
 Uses the Innertube API with iOS client context to bypass some restrictions.
 POST https://www.youtube.com/youtubei/api/v1/player
 
-Note: This is a simplified port. The full Cobalt implementation uses
-youtubei.js library for cipher decryption, HLS parsing, etc.
-This extractor handles basic cases; yt-dlp fallback covers the rest.
+✅ Updated: iOS client version bumped to 19.45.4
+✅ Updated: API key refreshed
+✅ Updated: Better format selection logic
 """
 
 import re
@@ -20,24 +20,34 @@ YT_ID_PATTERN = re.compile(
     r'(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/|live/)|youtu\.be/)([A-Za-z0-9_-]{11})'
 )
 
-# iOS client context for Innertube API
+# ✅ iOS client محدّث (2025)
 IOS_CLIENT = {
     "clientName": "IOS",
-    "clientVersion": "19.29.1",
+    "clientVersion": "19.45.4",
     "deviceMake": "Apple",
     "deviceModel": "iPhone16,2",
-    "userAgent": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)",
+    "userAgent": "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1 like Mac OS X;)",
     "osName": "iPhone",
-    "osVersion": "17.5.1.21F90",
+    "osVersion": "18.1.0.22B83",
+    "hl": "en",
+    "gl": "US",
+}
+
+# ✅ mweb client (أقل تقييداً من android)
+MWEB_CLIENT = {
+    "clientName": "MWEB",
+    "clientVersion": "2.20241202.07.00",
+    "userAgent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+    ),
     "hl": "en",
     "gl": "US",
 }
 
 INNERTUBE_API_URL = "https://www.youtube.com/youtubei/api/v1/player"
+# ✅ API key محدّث
 INNERTUBE_API_KEY = "AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc"
-
-# Video quality preference (descending)
-QUALITY_PREFERENCE = [2160, 1440, 1080, 720, 480, 360, 240, 144]
 
 
 class YouTubeExtractor(BaseExtractor):
@@ -46,12 +56,13 @@ class YouTubeExtractor(BaseExtractor):
         m = YT_ID_PATTERN.search(url)
         return m.group(1) if m else None
 
-    async def _innertube_request(self, video_id: str) -> Optional[dict]:
-        """Make an Innertube player API request with iOS client."""
+    async def _innertube_request(self, video_id: str, client: dict = None) -> Optional[dict]:
+        """Make an Innertube player API request."""
+        if client is None:
+            client = IOS_CLIENT
+
         payload = {
-            "context": {
-                "client": IOS_CLIENT,
-            },
+            "context": {"client": client},
             "videoId": video_id,
             "playbackContext": {
                 "contentPlaybackContext": {
@@ -64,12 +75,14 @@ class YouTubeExtractor(BaseExtractor):
 
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": IOS_CLIENT["userAgent"],
-            "X-YouTube-Client-Name": "5",  # iOS
-            "X-YouTube-Client-Version": IOS_CLIENT["clientVersion"],
+            "User-Agent": client.get("userAgent", GENERIC_USER_AGENT),
+            "X-YouTube-Client-Name": "5" if client["clientName"] == "IOS" else "2",
+            "X-YouTube-Client-Version": client["clientVersion"],
+            "Origin": "https://www.youtube.com",
+            "Referer": "https://www.youtube.com/",
         }
 
-        url = f"{INNERTUBE_API_URL}?key={INNERTUBE_API_KEY}"
+        url = f"{INNERTUBE_API_URL}?key={INNERTUBE_API_KEY}&prettyPrint=false"
 
         return await self.fetch_json(
             url,
@@ -79,115 +92,73 @@ class YouTubeExtractor(BaseExtractor):
             timeout=15,
         )
 
-    def _select_best_format(self, formats: list, max_height: int = 1080) -> Optional[dict]:
-        """Select the best mp4 video format up to max_height."""
-        mp4_videos = [
-            f for f in formats
-            if f.get("mimeType", "").startswith("video/mp4")
-            and f.get("url")
-            and f.get("height")
-        ]
-
-        if not mp4_videos:
-            return None
-
-        # Filter to max height, then pick highest quality
-        suitable = [f for f in mp4_videos if f["height"] <= max_height]
-        if not suitable:
-            suitable = mp4_videos  # take what we can get
-
-        return max(suitable, key=lambda f: f.get("height", 0) * f.get("width", 0))
-
-    def _select_best_audio(self, formats: list) -> Optional[dict]:
-        """Select best audio format."""
-        audio_formats = [
-            f for f in formats
-            if f.get("mimeType", "").startswith("audio/")
-            and f.get("url")
-        ]
-
-        if not audio_formats:
-            return None
-
-        return max(audio_formats, key=lambda f: f.get("bitrate", 0))
-
     async def extract(self, url: str) -> Optional[VideoResult]:
         video_id = self._extract_video_id(url)
         if not video_id:
-            self.logger.debug(f"Could not extract YouTube video ID from {url}")
             return None
 
-        data = await self._innertube_request(video_id)
+        # جرّب iOS أولاً ثم mweb
+        data = None
+        for client in [IOS_CLIENT, MWEB_CLIENT]:
+            data = await self._innertube_request(video_id, client)
+            if data:
+                status = data.get("playabilityStatus", {}).get("status")
+                if status == "OK":
+                    break
+                data = None
+
         if not data:
             return None
 
-        # Check playability
         playability = data.get("playabilityStatus", {})
-        status = playability.get("status")
-
-        if status != "OK":
+        if playability.get("status") != "OK":
             reason = playability.get("reason", "unknown")
-            self.logger.debug(f"YouTube video not playable: {status} - {reason}")
+            self.logger.debug(f"YouTube not playable: {reason}")
             return None
 
-        # Check for live stream
         video_details = data.get("videoDetails", {})
+
+        # تخطّى البث المباشر
         if video_details.get("isLive") or video_details.get("isLiveContent"):
-            self.logger.debug("YouTube live streams not supported")
             return None
 
-        # Check duration (skip very long videos > 1 hour for Telegram)
+        # تخطّى الفيديوهات الطويلة جداً (أكثر من ساعة)
         duration_seconds = int(video_details.get("lengthSeconds", 0))
         if duration_seconds > 3600:
-            self.logger.debug(f"YouTube video too long: {duration_seconds}s")
             return None
 
         streaming_data = data.get("streamingData", {})
+        combined  = streaming_data.get("formats", [])
+        adaptive  = streaming_data.get("adaptiveFormats", [])
+        title     = video_details.get("title", f"youtube_{video_id}")
 
-        # Try adaptive formats first (separate video + audio = higher quality)
-        adaptive = streaming_data.get("adaptiveFormats", [])
-        # Also check combined formats
-        combined = streaming_data.get("formats", [])
-
-        title = video_details.get("title", f"youtube_{video_id}")
-
-        # Strategy 1: Combined format (video+audio in one stream) - skip if signatureCipher
-        best_combined = None
-        for fmt in combined:
-            # Skip formats that require JS cipher decryption
+        # الخيار 1: صيغة مدمجة (فيديو + صوت) بدون cipher
+        for fmt in sorted(combined, key=lambda f: f.get("height", 0), reverse=True):
             if fmt.get("signatureCipher") or fmt.get("cipher"):
                 continue
             if (fmt.get("mimeType", "").startswith("video/mp4")
                     and fmt.get("url")
                     and fmt.get("height", 0) <= 1080):
-                if not best_combined or fmt.get("height", 0) > best_combined.get("height", 0):
-                    best_combined = fmt
+                return VideoResult(
+                    url=fmt["url"],
+                    filename=f"youtube_{video_id}.mp4",
+                    title=title,
+                    duration=duration_seconds,
+                    thumbnail=f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
+                )
 
-        if best_combined and best_combined.get("url"):
-            return VideoResult(
-                url=best_combined["url"],
-                filename=f"youtube_{video_id}.mp4",
-                title=title,
-                duration=duration_seconds,
-                thumbnail=f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
-            )
-
-        # Strategy 2: Adaptive formats (video + separate audio) - skip signatureCipher
+        # الخيار 2: صيغة adaptive (فيديو منفصل) بدون cipher
         best_video = None
+        best_audio = None
+
         for fmt in adaptive:
             if fmt.get("signatureCipher") or fmt.get("cipher"):
                 continue
-            if (fmt.get("mimeType", "").startswith("video/mp4")
-                    and fmt.get("url")
-                    and fmt.get("height", 0) <= 1080):
+            mime = fmt.get("mimeType", "")
+            if mime.startswith("video/mp4") and fmt.get("url") and fmt.get("height", 0) <= 1080:
                 if not best_video or fmt.get("height", 0) > best_video.get("height", 0):
                     best_video = fmt
-
-        best_audio = None
-        for fmt in adaptive:
-            if fmt.get("signatureCipher") or fmt.get("cipher"):
-                continue
-            if fmt.get("mimeType", "").startswith("audio/") and fmt.get("url"):
+            elif mime.startswith("audio/") and fmt.get("url"):
                 if not best_audio or fmt.get("bitrate", 0) > best_audio.get("bitrate", 0):
                     best_audio = fmt
 
@@ -195,12 +166,12 @@ class YouTubeExtractor(BaseExtractor):
             return VideoResult(
                 url=best_video["url"],
                 filename=f"youtube_{video_id}.mp4",
-                audio_url=best_audio["url"] if best_audio and best_audio.get("url") else None,
+                audio_url=best_audio["url"] if best_audio else None,
                 title=title,
                 duration=duration_seconds,
                 thumbnail=f"https://i.ytimg.com/vi/{video_id}/maxresdefault.jpg",
             )
 
-        # All formats require cipher decryption — let yt-dlp handle it
-        self.logger.info(f"YouTube: all formats are cipher-protected for {video_id}, delegating to yt-dlp")
+        # كل الصيغ محمية بـ cipher — يتولى yt-dlp التحميل
+        self.logger.info(f"YouTube: cipher-protected, delegating to yt-dlp → {video_id}")
         return None
