@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: vidzilla-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BOT_MODE
+        value: polling
+      - key: PORT
+        value: 7860
+      - key: HOST
+        value: 0.0.0.0
+      - key: MONGODB_DB_NAME
+        value: vidzilla
+      - key: MONGODB_USERS_COLLECTION
+        value: users
