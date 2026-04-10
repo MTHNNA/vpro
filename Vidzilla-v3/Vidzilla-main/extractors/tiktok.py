@@ -121,11 +121,6 @@ class TikTokExtractor(BaseExtractor):
             self.logger.debug(f"TikTok parse error: {e}")
             return None
 
-        # Check content classification (age-restricted)
-        if detail.get("isContentClassified"):
-            self.logger.debug("TikTok content is age-restricted")
-            return None
-
         if not detail.get("author"):
             return None
 
