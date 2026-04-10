@@ -408,5 +408,28 @@ class InstagramExtractor(BaseExtractor):
         except Exception as e:
             self.logger.debug(f"GQL failed: {e}")
 
+        # Strategy 5: try /p/{post_id}/?__a=1 with different session headers
+        try:
+            for cookie_hint in ["", "ig_did=1; ig_nrcb=1;"]:
+                headers = {
+                    **MOBILE_HEADERS,
+                    "cookie": cookie_hint,
+                    "referer": "https://www.instagram.com/",
+                }
+                data = await self.fetch_json(
+                    f"https://www.instagram.com/p/{post_id}/?__a=1&__d=dis",
+                    headers=headers,
+                )
+                if data:
+                    items = data.get("items") or [data.get("graphql", {}).get("shortcode_media")]
+                    items = [i for i in items if i]
+                    if items:
+                        result = self._extract_from_mobile_api(items[0], post_id)
+                        if result:
+                            self.logger.info("Instagram: extracted via mobile session")
+                            return result
+        except Exception as e:
+            self.logger.debug(f"Mobile session failed: {e}")
+
         self.logger.warning(f"Instagram: all methods failed for {post_id}")
         return None
