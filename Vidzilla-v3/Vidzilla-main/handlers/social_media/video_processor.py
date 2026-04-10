@@ -1,6 +1,5 @@
 """
 video_processor.py — Ultra-fast download + send engine
-Supports: single video, single photo, carousel/slideshow, audio extraction
 """
 
 import asyncio
@@ -14,8 +13,8 @@ import aiohttp
 import yt_dlp
 from aiogram import Bot
 from aiogram.types import (
-    FSInputFile, InputMediaPhoto, InputMediaVideo,
-    InputMediaAudio, InlineKeyboardMarkup, InlineKeyboardButton, Message,
+    FSInputFile, InputMediaPhoto, InputMediaVideo, Message,
+    InlineKeyboardMarkup, InlineKeyboardButton,
 )
 
 from config import (
@@ -29,6 +28,7 @@ from extractors import get_extractor
 from extractors.base import MediaItem
 
 logger = logging.getLogger(__name__)
+os.makedirs(TEMP_DIRECTORY, exist_ok=True)
 
 # ─── Shared aiohttp session ───────────────────────────────────────────────────
 _session: Optional[aiohttp.ClientSession] = None
@@ -47,66 +47,62 @@ async def get_session() -> aiohttp.ClientSession:
         )
     return _session
 
-# ─── UI helpers ───────────────────────────────────────────────────────────────
-def progress_bar(pct: float, width: int = 10) -> str:
-    filled = int(width * pct / 100)
-    return "[" + "█" * filled + "░" * (width - filled) + f"] {pct:.0f}%"
+# ─── UI ───────────────────────────────────────────────────────────────────────
+def _bar(pct: float) -> str:
+    n = int(10 * pct / 100)
+    return f"[{'█'*n}{'░'*(10-n)}] {pct:.0f}%"
 
-def msg_downloading(platform: str, pct: float = 0) -> str:
-    return f"{get_platform_emoji(platform)} *{platform}*\n⬇️ تحميل... {progress_bar(pct)}"
+def msg_dl(platform: str, pct: float = 0) -> str:
+    return f"{get_platform_emoji(platform)} *{platform}*\n⬇️ تحميل... {_bar(pct)}"
 
-def msg_uploading(size_mb: float) -> str:
-    return f"📤 إرسال `{size_mb:.1f} MB`..."
-
-def msg_done(size_mb: float, elapsed: float) -> str:
-    return f"✅ تم! `{size_mb:.1f} MB` في `{elapsed:.1f}s`"
-
-def msg_done_multi(count: int, elapsed: float) -> str:
-    return f"✅ تم إرسال {count} ملف في `{elapsed:.1f}s`"
-
-def msg_error(reason: str) -> str:
-    return f"❌ {reason}"
-
-def msg_extracting_audio() -> str:
-    return "🎵 جاري استخراج الصوت..."
-
-def msg_done_audio(elapsed: float) -> str:
-    return f"🎧 تم استخراج الصوت! في `{elapsed:.1f}s`"
+def msg_up(mb: float)        -> str: return f"📤 إرسال `{mb:.1f} MB`..."
+def msg_ok(mb: float, t: float) -> str: return f"✅ تم! `{mb:.1f} MB` في `{t:.1f}s`"
+def msg_ok_n(n: int, t: float)  -> str: return f"✅ تم إرسال {n} ملف في `{t:.1f}s`"
+def msg_audio_ok(t: float)   -> str: return f"🎧 تم استخراج الصوت في `{t:.1f}s`"
+def msg_err(r: str)          -> str: return f"❌ {r}"
 
 # ─── Error classifier ─────────────────────────────────────────────────────────
 def classify_error(e: Exception) -> str:
     s = str(e).lower()
-    if "private"   in s: return "المحتوى خاص 🔒"
-    if "login"     in s or "cookie" in s: return "يتطلب تسجيل دخول 🔑"
-    if "not found" in s or "404"    in s or "deleted" in s: return "الفيديو محذوف ❌"
-    if "age-restricted" in s or "confirm your age" in s or "age gate" in s: return "محتوى مقيد للعمر 🔞"
-    if "geo"       in s or "country" in s: return "غير متاح في هذه المنطقة 🌍"
-    if "copyright" in s or "dmca"   in s: return "محجوب بسبب حقوق الملكية 🚫"
-    if "rate"      in s or "429"    in s: return "طلبات كثيرة، انتظر دقيقة ⏳"
-    if "timeout"   in s or "timed"  in s: return "انتهت المهلة، حاول مجدداً ⏳"
-    if "no video"  in s or "no media" in s: return "المنشور لا يحتوي فيديو 📝"
-    return f"فشل التحميل: {str(e)[:80]}"
+    if "private"         in s: return "المحتوى خاص 🔒"
+    if "login"           in s or "sign in" in s: return "يتطلب تسجيل دخول — أرسل رابطاً عاماً 🔑"
+    if "cookie"          in s or "checkpoint" in s: return "الرابط خاص أو محمي 🔒"
+    if "not found"       in s or "404" in s or "deleted" in s: return "الفيديو محذوف ❌"
+    if "age-restricted"  in s or "confirm your age" in s: return "محتوى مقيد للعمر 🔞"
+    if "geo"             in s or "not available in your country" in s: return "غير متاح في هذه المنطقة 🌍"
+    if "copyright"       in s or "dmca" in s: return "محجوب بسبب حقوق الملكية 🚫"
+    if "rate"            in s or "429"  in s: return "طلبات كثيرة، انتظر دقيقة ⏳"
+    if "timeout"         in s or "timed out" in s: return "انتهت المهلة ⏳"
+    if "no video"        in s or "no media" in s: return "المنشور لا يحتوي فيديو 📝"
+    if "unsupported url" in s or "unable to extract" in s: return "الرابط غير مدعوم ❌"
+    return f"فشل التحميل — تأكد أن الرابط عام\n`{str(e)[:80]}`"
 
 # ─── File utils ───────────────────────────────────────────────────────────────
-def file_size_mb(path: str) -> float:
-    try:   return os.path.getsize(path) / (1024 * 1024)
+def file_mb(path: str) -> float:
+    try:   return os.path.getsize(path) / 1_048_576
     except: return 0.0
 
 def find_file(base: str) -> Optional[str]:
-    for ext in [".mp4", ".webm", ".mkv", ".avi", ".mov", ".flv",
-                ".m4v", ".mp3", ".m4a", ".opus", ".jpg", ".jpeg", ".png"]:
+    for ext in [".mp4", ".webm", ".mkv", ".avi", ".mov",
+                ".flv", ".m4v", ".mp3", ".m4a", ".opus", ".jpg", ".png"]:
         p = base + ext
         if os.path.exists(p) and os.path.getsize(p) > 0:
             return p
     return None
 
-def new_temp_path(platform: str, user_id: int, ext: str = "%(ext)s") -> str:
-    uid = str(uuid.uuid4())[:8]
-    return os.path.join(TEMP_DIRECTORY, f"{platform.lower()}_{user_id}_{uid}.{ext}")
+def tmp(platform: str, user_id: int, ext: str = "%(ext)s") -> str:
+    return os.path.join(TEMP_DIRECTORY,
+                        f"{platform.lower()}_{user_id}_{uuid.uuid4().hex[:8]}.{ext}")
 
-# ─── yt-dlp options ───────────────────────────────────────────────────────────
-def ytdlp_opts(output: str, platform: str, audio_only: bool = False) -> dict:
-    opts = {
+# ─── yt-dlp runner (fixed closure) ───────────────────────────────────────────
+def _run_ytdlp(url: str, opts: dict):
+    """Synchronous yt-dlp download — runs in executor."""
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        ydl.download([url])
+
+# ─── yt-dlp options per platform ──────────────────────────────────────────────
+def _base_opts(output: str) -> dict:
+    return {
         "outtmpl"                      : output,
         "quiet"                        : True,
         "no_color"                     : True,
@@ -118,68 +114,120 @@ def ytdlp_opts(output: str, platform: str, audio_only: bool = False) -> dict:
         "fragment_retries"             : 5,
         "concurrent_fragment_downloads": 8,
         "http_headers"                 : {"User-Agent": get_random_user_agent()},
-        "writeinfojson"                : False,
-        "writesubtitles"               : False,
-        "writethumbnail"               : False,
-        "postprocessors"               : [],
-        "extractor_args"               : {
-            "youtube" : {"player_client": ["ios", "android", "web"]},
-            "tiktok"  : {"api_hostname" : ["api22-normal-c-useast2a.tiktokv.com", "api19-normal-c-useast1a.tiktokv.com"]},
+        "writeinfojson"  : False,
+        "writesubtitles" : False,
+        "writethumbnail" : False,
+        "postprocessors" : [],
+        "extractor_args" : {
+            "youtube": {"player_client": ["ios", "android", "web"]},
+            "tiktok" : {"api_hostname" : [
+                "api22-normal-c-useast2a.tiktokv.com",
+                "api19-normal-c-useast1a.tiktokv.com",
+            ]},
         },
     }
+
+def build_opts(output: str, platform: str, audio_only: bool = False) -> list:
+    """Return list of opts dicts to try (best → worst)."""
+    base = _base_opts(output)
     if COOKIES_ENABLED:
-        opts["cookiefile"] = COOKIES_FILE
+        base["cookiefile"] = COOKIES_FILE
 
     if audio_only:
-        opts["format"] = "bestaudio/best"
-        opts["postprocessors"].append({
-            "key"             : "FFmpegExtractAudio",
-            "preferredcodec"  : "mp3",
+        base["format"] = "bestaudio/best"
+        base["postprocessors"].append({
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
             "preferredquality": "320",
         })
-        return opts
+        return [base]
 
+    # Platform-specific options
     if platform == "YouTube":
-        opts["format"] = (
+        import copy
+        opt_hq = copy.deepcopy(base)
+        opt_hq["format"] = (
             "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]"
             "/bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
             "/best[ext=mp4][height<=1080]/best[ext=mp4]/best"
         )
-        opts["merge_output_format"] = "mp4"
-        opts["postprocessors"].append({"key": "FFmpegVideoConvertor", "preferedformat": "mp4"})
+        opt_hq["merge_output_format"] = "mp4"
+        opt_hq["postprocessors"].append({"key": "FFmpegVideoConvertor", "preferedformat": "mp4"})
+
+        opt_simple = copy.deepcopy(base)
+        opt_simple["format"] = "best[ext=mp4]/best"
+        return [opt_hq, opt_simple]
+
     elif platform == "Instagram":
-        opts["format"] = "best[ext=mp4]/best"
-        opts["http_headers"] = {
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+        import copy
+        opt1 = copy.deepcopy(base)
+        opt1["format"] = "best[ext=mp4]/best"
+        opt1["http_headers"] = {
+            "User-Agent": (
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
+                "AppleWebKit/605.1.15 Mobile/21F90 Instagram 333.0.0.35.95"
+            ),
             "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
         }
+        opt2 = copy.deepcopy(base)
+        opt2["format"] = "best"
+        return [opt1, opt2]
+
+    elif platform == "TikTok":
+        import copy
+        opt1 = copy.deepcopy(base)
+        opt1["format"] = "best[ext=mp4]/best"
+        opt2 = copy.deepcopy(base)
+        opt2["format"] = "best"
+        return [opt1, opt2]
+
+    elif platform == "Twitter":
+        import copy
+        opt1 = copy.deepcopy(base)
+        opt1["format"] = "best[ext=mp4]/best"
+        return [opt1]
+
     elif platform == "SoundCloud":
-        opts["format"] = "bestaudio/best"
-        opts["postprocessors"].append({
-            "key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320",
+        import copy
+        opt1 = copy.deepcopy(base)
+        opt1["format"] = "bestaudio/best"
+        opt1["postprocessors"].append({
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "320",
         })
+        return [opt1]
+
     else:
-        opts["format"] = "best[ext=mp4][filesize<50M]/best[ext=mp4]/best"
+        # Facebook, Vimeo, Dailymotion, Twitch, Reddit, etc.
+        import copy
+        opt1 = copy.deepcopy(base)
+        opt1["format"] = "best[ext=mp4][filesize<50M]/best[ext=mp4]/best"
+        opt2 = copy.deepcopy(base)
+        opt2["format"] = "best"
+        opt3 = copy.deepcopy(base)
+        opt3["format"] = "worst"
+        return [opt1, opt2, opt3]
 
-    return opts
 
-
-# ─── Single file downloader ───────────────────────────────────────────────────
-async def _download_one_url(session: aiohttp.ClientSession, url: str,
-                             dest: str, headers: dict) -> bool:
-    """Stream download a direct URL to dest file."""
+# ─── Direct URL downloader ────────────────────────────────────────────────────
+async def _dl_url(session: aiohttp.ClientSession,
+                   url: str, dest: str, headers: dict) -> bool:
     try:
-        async with session.get(url, headers=headers,
-                               timeout=aiohttp.ClientTimeout(total=90)) as resp:
+        async with session.get(
+            url, headers=headers,
+            timeout=aiohttp.ClientTimeout(total=90),
+        ) as resp:
             if resp.status != 200:
                 return False
-            downloaded = 0
-            limit = TELEGRAM_VIDEO_LIMIT_MB * 1024 * 1024
+            total = 0
+            limit = TELEGRAM_VIDEO_LIMIT_MB * 1_048_576
             with open(dest, "wb") as f:
                 async for chunk in resp.content.iter_chunked(256 * 1024):
                     f.write(chunk)
-                    downloaded += len(chunk)
-                    if downloaded > limit:
+                    total += len(chunk)
+                    if total > limit:
                         os.unlink(dest)
                         return False
         return os.path.exists(dest) and os.path.getsize(dest) > 0
@@ -189,17 +237,10 @@ async def _download_one_url(session: aiohttp.ClientSession, url: str,
 
 # ─── Main Downloader ──────────────────────────────────────────────────────────
 class VideoDownloader:
-    def __init__(self):
-        os.makedirs(TEMP_DIRECTORY, exist_ok=True)
 
-    # ── Direct extractor (fastest path) ─────────────────────────────────────
+    # ── 1. Direct extractor ──────────────────────────────────────────────────
     async def _try_direct(self, url: str, platform: str,
                            user_id: int) -> Optional[dict]:
-        """
-        Returns dict:
-          {"type": "single", "path": str}
-          {"type": "carousel", "items": [(path, is_video), ...]}
-        """
         try:
             session   = await get_session()
             extractor = get_extractor(platform, session)
@@ -210,81 +251,81 @@ class VideoDownloader:
             if not result:
                 return None
 
-            ua = get_random_user_agent()
-
-            # ── Carousel / slideshow ────────────────────────────────────────
-            if result.carousel and len(result.carousel) > 1:
-                logger.info(f"[Direct] {platform} → carousel {len(result.carousel)} items")
-                items_out = []
-                # Download all items concurrently
-                tasks = []
-                paths = []
-                for item in result.carousel:
-                    ext  = "mp4" if item.is_video else "jpg"
-                    dest = new_temp_path(platform, user_id, ext)
-                    paths.append((dest, item.is_video))
-                    hdrs = dict(item.headers or {})
-                    if not any(k.lower() == "user-agent" for k in hdrs):
-                        hdrs["User-Agent"] = ua
-                    tasks.append(_download_one_url(session, item.url, dest, hdrs))
-
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for (dest, is_video), ok in zip(paths, results):
-                    if ok is True and os.path.exists(dest):
-                        items_out.append((dest, is_video))
-
-                if items_out:
-                    return {"type": "carousel", "items": items_out}
-                return None
-
-            # ── Single file ─────────────────────────────────────────────────
-            if not result.url:
-                return None
-
-            ext  = "jpg" if result.is_photo else "mp4"
-            dest = new_temp_path(platform, user_id, ext)
+            ua   = get_random_user_agent()
             hdrs = dict(result.headers or {})
             if not any(k.lower() == "user-agent" for k in hdrs):
                 hdrs["User-Agent"] = ua
 
-            ok = await _download_one_url(session, result.url, dest, hdrs)
+            # Carousel
+            if result.carousel and len(result.carousel) > 1:
+                tasks = []
+                paths = []
+                for item in result.carousel:
+                    ext  = "mp4" if item.is_video else "jpg"
+                    dest = tmp(platform, user_id, ext)
+                    paths.append((dest, item.is_video))
+                    h = dict(item.headers or {"User-Agent": ua})
+                    tasks.append(_dl_url(session, item.url, dest, h))
+
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                items_out = [
+                    (dest, is_v)
+                    for (dest, is_v), ok in zip(paths, results)
+                    if ok is True and os.path.exists(dest)
+                ]
+                if items_out:
+                    logger.info(f"[Direct] {platform} carousel → {len(items_out)} items")
+                    return {"type": "carousel", "items": items_out}
+                return None
+
+            # Single
+            if not result.url:
+                return None
+
+            ext  = "jpg" if result.is_photo else "mp4"
+            dest = tmp(platform, user_id, ext)
+            ok   = await _dl_url(session, result.url, dest, hdrs)
             if ok:
-                logger.info(f"[Direct] {platform} → {file_size_mb(dest):.1f}MB")
+                logger.info(f"[Direct] {platform} → {file_mb(dest):.1f}MB")
                 return {"type": "single", "path": dest}
 
         except Exception as e:
             logger.debug(f"[Direct] {platform} failed: {e}")
         return None
 
-    # ── yt-dlp fallback ──────────────────────────────────────────────────────
+    # ── 2. yt-dlp fallback ───────────────────────────────────────────────────
     async def _try_ytdlp(self, url: str, platform: str,
-                          user_id: int, audio_only: bool = False) -> Optional[str]:
-        out_tmpl = new_temp_path(platform, user_id, "%(ext)s")
-        base     = out_tmpl.replace(".%(ext)s", "")
-        opts     = ytdlp_opts(out_tmpl, platform, audio_only)
-        last_err = None
+                          user_id: int, audio_only: bool = False) -> str:
+        out_tmpl  = tmp(platform, user_id, "%(ext)s")
+        base      = out_tmpl.replace(".%(ext)s", "")
+        opts_list = build_opts(out_tmpl, platform, audio_only)
+        last_err  = None
 
-        formats = [opts["format"], "best[ext=mp4]/best", "worst"] if not audio_only else [opts["format"]]
-
-        for fmt in formats:
-            opts["format"] = fmt
+        for opts in opts_list:
             try:
-                def run():
-                    with yt_dlp.YoutubeDL(opts) as ydl:
-                        ydl.download([url])
-                await asyncio.get_event_loop().run_in_executor(None, run)
+                loop = asyncio.get_event_loop()
+                # Pass opts by value using lambda with default arg (fixes closure bug)
+                await loop.run_in_executor(None, lambda o=opts: _run_ytdlp(url, o))
+
                 path = find_file(base)
                 if path:
-                    logger.info(f"[yt-dlp] {platform} {'audio' if audio_only else 'video'} → {file_size_mb(path):.1f}MB")
+                    logger.info(f"[yt-dlp] {platform} → {file_mb(path):.1f}MB")
                     return path
+
             except yt_dlp.utils.DownloadError as e:
                 last_err = e
-                if any(x in classify_error(e) for x in ["خاص", "محذوف", "حقوق"]):
+                err_cls  = classify_error(e)
+                logger.warning(f"[yt-dlp] {platform} DownloadError: {str(e)[:100]}")
+                # Stop retrying on truly permanent errors
+                if any(x in err_cls for x in ["خاص 🔒", "محذوف", "حقوق", "تسجيل دخول"]):
                     break
+
             except Exception as e:
                 last_err = e
-            # Clean partial
-            for ext in [".mp4", ".webm", ".mkv", ".part", ".ytdl", ".mp3"]:
+                logger.warning(f"[yt-dlp] {platform} error: {str(e)[:100]}")
+
+            # Cleanup partial files before next attempt
+            for ext in [".mp4", ".webm", ".mkv", ".part", ".ytdl", ".mp3", ".m4a"]:
                 p = base + ext
                 if os.path.exists(p):
                     try: os.unlink(p)
@@ -292,37 +333,13 @@ class VideoDownloader:
 
         if last_err:
             raise last_err
-        raise Exception("All download attempts failed")
+        raise Exception("جميع محاولات التحميل فشلت")
 
-    # ── Audio extraction from local file ────────────────────────────────────
-    async def _extract_audio_from_file(self, video_path: str) -> Optional[str]:
-        """Use ffmpeg to extract MP3 from an already-downloaded video file."""
-        out = video_path.rsplit(".", 1)[0] + "_audio.mp3"
-        cmd = [
-            "ffmpeg", "-y", "-i", video_path,
-            "-vn", "-acodec", "libmp3lame", "-q:a", "2",
-            out, "-loglevel", "error"
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-            if proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
-                logger.info(f"[Audio] extracted MP3: {file_size_mb(out):.1f}MB")
-                return out
-            else:
-                logger.warning(f"[Audio] ffmpeg error: {stderr.decode()[:200]}")
-        except Exception as e:
-            logger.warning(f"[Audio] extraction failed: {e}")
-        return None
+    # ── Main ─────────────────────────────────────────────────────────────────
+    async def download(self, url: str, platform: str, user_id: int,
+                        audio_only: bool = False,
+                        progress_cb=None) -> dict:
 
-    # ── Main entry ────────────────────────────────────────────────────────────
-    async def download(self, url: str, platform: str,
-                       user_id: int, audio_only: bool = False,
-                       progress_cb=None) -> dict:
         if progress_cb: await progress_cb(5)
 
         if not audio_only:
@@ -337,33 +354,26 @@ class VideoDownloader:
         return {"type": "single", "path": path}
 
 
-# ─── Telegram sender ──────────────────────────────────────────────────────────
+# ─── Telegram senders ─────────────────────────────────────────────────────────
 async def send_single(bot: Bot, chat_id: int, path: str,
                        platform: str, reply_to: int = None):
-    """Send a single file (video/photo/audio) with fallback."""
     is_audio = path.endswith((".mp3", ".m4a", ".opus", ".ogg"))
     is_photo = path.endswith((".jpg", ".jpeg", ".png", ".webp"))
 
     if is_audio:
-        fname = f"{platform.lower()}_audio.mp3"
-        await bot.send_audio(
-            chat_id=chat_id,
-            audio=FSInputFile(path, filename=fname),
-        )
+        await bot.send_audio(chat_id=chat_id,
+                              audio=FSInputFile(path, filename=f"{platform}.mp3"))
         return
 
     if is_photo:
         await bot.send_photo(chat_id=chat_id, photo=FSInputFile(path))
         return
 
-    # Video: try as streamable video first, then document
     video_msg = None
     try:
         video_msg = await bot.send_video(
-            chat_id=chat_id,
-            video=FSInputFile(path),
-            supports_streaming=True,
-            reply_to_message_id=reply_to,
+            chat_id=chat_id, video=FSInputFile(path),
+            supports_streaming=True, reply_to_message_id=reply_to,
         )
     except Exception as e:
         logger.warning(f"send_video failed: {e}")
@@ -381,130 +391,86 @@ async def send_single(bot: Bot, chat_id: int, path: str,
             raise
 
 
-async def send_carousel(bot: Bot, chat_id: int,
-                         items: list, platform: str):
-    """
-    Send carousel as Telegram media group (max 10 per group).
-    items = [(path, is_video), ...]
-    """
-    CHUNK = 10
-    for i in range(0, len(items), CHUNK):
-        chunk = items[i:i+CHUNK]
-        media_group = []
-        for path, is_video in chunk:
-            if is_video:
-                media_group.append(InputMediaVideo(media=FSInputFile(path)))
-            else:
-                media_group.append(InputMediaPhoto(media=FSInputFile(path)))
+async def send_carousel(bot: Bot, chat_id: int, items: list, platform: str):
+    for i in range(0, len(items), 10):
+        chunk = items[i:i+10]
+        group = [
+            InputMediaVideo(media=FSInputFile(p)) if is_v
+            else InputMediaPhoto(media=FSInputFile(p))
+            for p, is_v in chunk
+        ]
         try:
-            await bot.send_media_group(chat_id=chat_id, media=media_group)
+            await bot.send_media_group(chat_id=chat_id, media=group)
         except Exception as e:
             logger.warning(f"media_group failed: {e}")
-            # Fallback: send individually
-            for path, is_video in chunk:
+            for p, is_v in chunk:
                 try:
-                    if is_video:
-                        await bot.send_video(chat_id=chat_id, video=FSInputFile(path))
-                    else:
-                        await bot.send_photo(chat_id=chat_id, photo=FSInputFile(path))
-                except Exception as ex:
-                    logger.warning(f"individual send failed: {ex}")
-        # Small delay between chunks to avoid flood
-        if i + CHUNK < len(items):
+                    if is_v: await bot.send_video(chat_id=chat_id, video=FSInputFile(p))
+                    else:    await bot.send_photo(chat_id=chat_id, photo=FSInputFile(p))
+                except Exception: pass
+        if i + 10 < len(items):
             await asyncio.sleep(0.5)
 
 
-# ─── Inline keyboard for video options ────────────────────────────────────────
-def make_options_keyboard(platform: str) -> InlineKeyboardMarkup:
-    """Keyboard shown after video is sent with option to extract audio."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🎵 استخراج الصوت MP3", callback_data=f"audio_done"),
-    ]])
-
-
-# ─── Main pipeline ────────────────────────────────────────────────────────────
+# ─── Main pipeline ─────────────────────────────────────────────────────────────
 async def process_social_media_video(
-    message: Message,
-    bot: Bot,
-    url: str,
-    platform: str,
-    progress_msg=None,
-    audio_only: bool = False,
+    message: Message, bot: Bot,
+    url: str, platform: str,
+    progress_msg=None, audio_only: bool = False,
 ):
     downloader = VideoDownloader()
-    t_start    = time.monotonic()
+    t0         = time.monotonic()
     all_paths  = []
 
-    async def update_progress(pct: float):
+    async def upd(pct: float):
         if progress_msg:
-            if audio_only:
-                await safe_edit_message(progress_msg, msg_extracting_audio())
-            else:
-                await safe_edit_message(progress_msg, msg_downloading(platform, pct))
+            txt = "🎵 جاري استخراج الصوت..." if audio_only else msg_dl(platform, pct)
+            await safe_edit_message(progress_msg, txt)
 
     try:
-        if progress_msg:
-            await safe_edit_message(
-                progress_msg,
-                msg_extracting_audio() if audio_only else msg_downloading(platform, 0),
-            )
+        await upd(0)
+        result = await downloader.download(url, platform, message.from_user.id,
+                                            audio_only=audio_only, progress_cb=upd)
+        elapsed = time.monotonic() - t0
 
-        result = await downloader.download(
-            url, platform, message.from_user.id,
-            audio_only=audio_only,
-            progress_cb=update_progress,
-        )
-
-        elapsed = time.monotonic() - t_start
-
-        # ── Carousel ────────────────────────────────────────────────────────
         if result["type"] == "carousel":
-            items = result["items"]
+            items    = result["items"]
             all_paths = [p for p, _ in items]
-            total_mb  = sum(file_size_mb(p) for p in all_paths)
-
-            if progress_msg:
-                await safe_edit_message(progress_msg, msg_uploading(total_mb))
-
+            total_mb = sum(file_mb(p) for p in all_paths)
+            if progress_msg: await safe_edit_message(progress_msg, msg_up(total_mb))
             await send_carousel(bot, message.chat.id, items, platform)
+            if progress_msg: await safe_edit_message(progress_msg, msg_ok_n(len(items), elapsed))
 
-            if progress_msg:
-                await safe_edit_message(progress_msg, msg_done_multi(len(items), elapsed))
-
-        # ── Single file ──────────────────────────────────────────────────────
         else:
             path = result["path"]
             all_paths = [path]
-            size_mb   = file_size_mb(path)
+            mb = file_mb(path)
 
-            if size_mb > TELEGRAM_VIDEO_LIMIT_MB and not audio_only:
+            if mb > TELEGRAM_VIDEO_LIMIT_MB and not audio_only:
                 if progress_msg:
-                    await safe_edit_message(progress_msg, f"⚠️ الملف كبير جداً `{size_mb:.1f} MB` (الحد ٥٠ MB)")
+                    await safe_edit_message(progress_msg, f"⚠️ الملف كبير جداً `{mb:.1f} MB` (الحد ٥٠ MB)")
                 return
 
-            if progress_msg:
-                await safe_edit_message(progress_msg, msg_uploading(size_mb))
-
+            if progress_msg: await safe_edit_message(progress_msg, msg_up(mb))
             await send_single(bot, message.chat.id, path, platform)
 
-            if audio_only:
-                if progress_msg:
-                    await safe_edit_message(progress_msg, msg_done_audio(elapsed))
-            else:
-                if progress_msg:
-                    await safe_edit_message(progress_msg, msg_done(size_mb, elapsed))
+            if progress_msg:
+                txt = msg_audio_ok(elapsed) if audio_only else msg_ok(mb, elapsed)
+                await safe_edit_message(progress_msg, txt)
 
-        logger.info(f"✅ {platform} | {elapsed:.1f}s | audio_only={audio_only}")
+        logger.info(f"✅ {platform} | {elapsed:.1f}s")
 
     except yt_dlp.utils.DownloadError as e:
-        err = msg_error(classify_error(e))
+        err = msg_err(classify_error(e))
+        logger.error(f"[{platform}] DownloadError: {e}")
         if progress_msg: await safe_edit_message(progress_msg, err)
         else: await bot.send_message(message.chat.id, err)
 
     except Exception as e:
         s   = str(e).lower()
-        err = msg_error("انتهت المهلة ⏳" if "timeout" in s or "timed" in s else classify_error(e))
-        logger.error(f"Error [{platform}]: {e}")
+        err = msg_err("انتهت المهلة ⏳" if "timeout" in s or "timed" in s
+                       else classify_error(e))
+        logger.error(f"[{platform}] Error: {e}")
         if progress_msg: await safe_edit_message(progress_msg, err)
         else: await bot.send_message(message.chat.id, err)
 
@@ -517,32 +483,20 @@ async def process_social_media_video(
         except: pass
 
 
-# ─── Audio extraction pipeline ────────────────────────────────────────────────
-async def process_audio_extraction(
-    message: Message,
-    bot: Bot,
-    url: str,
-    platform: str,
-    progress_msg=None,
-):
-    """Download video then extract MP3 audio from it."""
-    await process_social_media_video(
-        message, bot, url, platform, progress_msg, audio_only=True
-    )
+# ─── Audio extraction ─────────────────────────────────────────────────────────
+async def process_audio_extraction(message, bot, url, platform, progress_msg=None):
+    await process_social_media_video(message, bot, url, platform, progress_msg, audio_only=True)
 
 
 # ─── Platform detector ────────────────────────────────────────────────────────
 async def detect_platform_and_process(
-    message: Message,
-    bot: Bot,
-    url: str,
-    progress_msg=None,
-    audio_only: bool = False,
+    message: Message, bot: Bot, url: str,
+    progress_msg=None, audio_only: bool = False,
 ) -> bool:
     for domain, platform in PLATFORM_IDENTIFIERS.items():
         if domain in url:
             await process_social_media_video(
-                message, bot, url, platform, progress_msg, audio_only=audio_only
+                message, bot, url, platform, progress_msg, audio_only,
             )
             return True
     return False
