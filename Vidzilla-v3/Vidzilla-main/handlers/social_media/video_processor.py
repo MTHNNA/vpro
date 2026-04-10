@@ -79,7 +79,7 @@ def classify_error(e: Exception) -> str:
     if "private"   in s: return "المحتوى خاص 🔒"
     if "login"     in s or "cookie" in s: return "يتطلب تسجيل دخول 🔑"
     if "not found" in s or "404"    in s or "deleted" in s: return "الفيديو محذوف ❌"
-    if "age"       in s: return "محتوى مقيد للعمر 🔞"
+    if "age-restricted" in s or "confirm your age" in s or "age gate" in s: return "محتوى مقيد للعمر 🔞"
     if "geo"       in s or "country" in s: return "غير متاح في هذه المنطقة 🌍"
     if "copyright" in s or "dmca"   in s: return "محجوب بسبب حقوق الملكية 🚫"
     if "rate"      in s or "429"    in s: return "طلبات كثيرة، انتظر دقيقة ⏳"
@@ -124,7 +124,7 @@ def ytdlp_opts(output: str, platform: str, audio_only: bool = False) -> dict:
         "postprocessors"               : [],
         "extractor_args"               : {
             "youtube" : {"player_client": ["ios", "android", "web"]},
-            "tiktok"  : {"api_hostname" : ["api22-normal-c-useast2a.tiktokv.com"]},
+            "tiktok"  : {"api_hostname" : ["api22-normal-c-useast2a.tiktokv.com", "api19-normal-c-useast1a.tiktokv.com"]},
         },
     }
     if COOKIES_ENABLED:
@@ -279,7 +279,7 @@ class VideoDownloader:
                     return path
             except yt_dlp.utils.DownloadError as e:
                 last_err = e
-                if any(x in classify_error(e) for x in ["خاص", "محذوف", "مقيد", "حقوق"]):
+                if any(x in classify_error(e) for x in ["خاص", "محذوف", "حقوق"]):
                     break
             except Exception as e:
                 last_err = e
