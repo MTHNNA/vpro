@@ -10,6 +10,7 @@ from config import BOT_TOKEN, BOT_MODE, WEBHOOK_PATH, WEBHOOK_URL, PORT, HOST
 from handlers.handlers import register_handlers
 from handlers.admin import register_admin_handlers
 from utils.cleanup import cleanup_temp_directory
+from utils.keep_alive import start_keep_alive
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,6 +58,7 @@ class VidZillaBot:
         health_runner = await self._start_health_server()
         logger.info("Polling mode: deleting existing webhook")
         await self.bot.delete_webhook(drop_pending_updates=True)
+        start_keep_alive()  # منع Render من إيقاف البوت
         logger.info("Starting long polling")
         try:
             await self.dp.start_polling(
