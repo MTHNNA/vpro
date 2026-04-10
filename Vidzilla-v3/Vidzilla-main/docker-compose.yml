@@ -9,14 +9,14 @@ services:
     environment:
       BOT_TOKEN: ${BOT_TOKEN:-}
       BOT_MODE: ${BOT_MODE:-polling}
-      PORT: ${PORT:-8000}
+      PORT: ${PORT:-7860}
       HOST: ${HOST:-0.0.0.0}
       WEBHOOK_PATH: ${WEBHOOK_PATH:-}
       WEBHOOK_URL: ${WEBHOOK_URL:-}
       MONGODB_URI: ${MONGODB_URI:-}
-      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-}
+      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-vidzilla}
       MONGODB_USERS_COLLECTION: ${MONGODB_USERS_COLLECTION:-users}
       ADMIN_IDS: ${ADMIN_IDS:-}
     ports:
-      - "${PORT:-8000}:${PORT:-8000}"
+      - "${PORT:-7860}:${PORT:-7860}"
     restart: unless-stopped
