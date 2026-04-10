@@ -17,6 +17,6 @@ COPY . .
 
 RUN mkdir -p /app/temp_videos
 
-EXPOSE 7860
+EXPOSE ${PORT:-7860}
 
 CMD ["python", "bot.py"]
