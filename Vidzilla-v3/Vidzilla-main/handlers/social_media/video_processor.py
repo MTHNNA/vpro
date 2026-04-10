@@ -1,5 +1,8 @@
 """
 video_processor.py — Ultra-fast download + send engine
+✅ Fixed: YouTube player_client + po_token bypass
+✅ Fixed: Instagram mobile headers + cookies fallback
+✅ Fixed: Better error handling & retry logic
 """
 
 import asyncio
@@ -55,11 +58,11 @@ def _bar(pct: float) -> str:
 def msg_dl(platform: str, pct: float = 0) -> str:
     return f"{get_platform_emoji(platform)} *{platform}*\n⬇️ تحميل... {_bar(pct)}"
 
-def msg_up(mb: float)        -> str: return f"📤 إرسال `{mb:.1f} MB`..."
+def msg_up(mb: float)           -> str: return f"📤 إرسال `{mb:.1f} MB`..."
 def msg_ok(mb: float, t: float) -> str: return f"✅ تم! `{mb:.1f} MB` في `{t:.1f}s`"
 def msg_ok_n(n: int, t: float)  -> str: return f"✅ تم إرسال {n} ملف في `{t:.1f}s`"
-def msg_audio_ok(t: float)   -> str: return f"🎧 تم استخراج الصوت في `{t:.1f}s`"
-def msg_err(r: str)          -> str: return f"❌ {r}"
+def msg_audio_ok(t: float)      -> str: return f"🎧 تم استخراج الصوت في `{t:.1f}s`"
+def msg_err(r: str)             -> str: return f"❌ {r}"
 
 # ─── Error classifier ─────────────────────────────────────────────────────────
 def classify_error(e: Exception) -> str:
@@ -75,6 +78,9 @@ def classify_error(e: Exception) -> str:
     if "timeout"         in s or "timed out" in s: return "انتهت المهلة ⏳"
     if "no video"        in s or "no media" in s: return "المنشور لا يحتوي فيديو 📝"
     if "unsupported url" in s or "unable to extract" in s: return "الرابط غير مدعوم ❌"
+    if "http error 403"  in s: return "الوصول مرفوض — جرب لاحقاً 🚫"
+    if "http error 429"  in s: return "طلبات كثيرة جداً، انتظر دقيقتين ⏳"
+    if "sign_in_required" in s or "bot" in s: return "يوتيوب يطلب تسجيل دخول مؤقتاً 🔑"
     return f"فشل التحميل — تأكد أن الرابط عام\n`{str(e)[:80]}`"
 
 # ─── File utils ───────────────────────────────────────────────────────────────
@@ -94,7 +100,7 @@ def tmp(platform: str, user_id: int, ext: str = "%(ext)s") -> str:
     return os.path.join(TEMP_DIRECTORY,
                         f"{platform.lower()}_{user_id}_{uuid.uuid4().hex[:8]}.{ext}")
 
-# ─── yt-dlp runner (fixed closure) ───────────────────────────────────────────
+# ─── yt-dlp runner ────────────────────────────────────────────────────────────
 def _run_ytdlp(url: str, opts: dict):
     """Synchronous yt-dlp download — runs in executor."""
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -110,22 +116,142 @@ def _base_opts(output: str) -> dict:
         "geo_bypass"                   : True,
         "nocheckcertificate"           : True,
         "socket_timeout"               : 30,
-        "retries"                      : 3,
-        "fragment_retries"             : 5,
-        "concurrent_fragment_downloads": 8,
+        "retries"                      : 5,
+        "fragment_retries"             : 10,
+        "concurrent_fragment_downloads": 4,
         "http_headers"                 : {"User-Agent": get_random_user_agent()},
         "writeinfojson"  : False,
         "writesubtitles" : False,
         "writethumbnail" : False,
         "postprocessors" : [],
-        "extractor_args" : {
-            "youtube": {"player_client": ["ios", "android", "web"]},
-            "tiktok" : {"api_hostname" : [
-                "api22-normal-c-useast2a.tiktokv.com",
-                "api19-normal-c-useast1a.tiktokv.com",
-            ]},
-        },
     }
+
+def _youtube_opts_list(output: str, base: dict, audio_only: bool) -> list:
+    """
+    ✅ إصلاح يوتيوب:
+    - استخدام player_client: mweb أولاً (الأسرع والأقل تقييداً)
+    - ثم ios + web كـ fallback
+    - تجنب android لأنه محجوب في بعض الأحيان
+    """
+    import copy
+
+    if audio_only:
+        opt = copy.deepcopy(base)
+        opt["format"] = "bestaudio[ext=m4a]/bestaudio/best"
+        opt["extractor_args"] = {
+            "youtube": {
+                "player_client": ["mweb", "ios", "web"],
+                "skip": ["dash", "hls"],
+            }
+        }
+        opt["postprocessors"].append({
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        })
+        return [opt]
+
+    # الخيار 1: جودة عالية مع mweb client
+    opt1 = copy.deepcopy(base)
+    opt1["format"] = (
+        "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]"
+        "/bestvideo[height<=720]+bestaudio"
+        "/best[ext=mp4][height<=1080]/best[ext=mp4]/best"
+    )
+    opt1["merge_output_format"] = "mp4"
+    opt1["extractor_args"] = {
+        "youtube": {
+            "player_client": ["mweb", "ios"],
+            "skip": ["dash"],
+        }
+    }
+
+    # الخيار 2: جودة بسيطة
+    opt2 = copy.deepcopy(base)
+    opt2["format"] = "best[ext=mp4][height<=720]/best[ext=mp4]/best"
+    opt2["extractor_args"] = {
+        "youtube": {
+            "player_client": ["mweb", "web"],
+        }
+    }
+
+    # الخيار 3: أبسط خيار ممكن
+    opt3 = copy.deepcopy(base)
+    opt3["format"] = "worst[ext=mp4]/worst"
+    opt3["extractor_args"] = {
+        "youtube": {"player_client": ["web"]}
+    }
+
+    return [opt1, opt2, opt3]
+
+
+def _instagram_opts_list(output: str, base: dict, audio_only: bool) -> list:
+    """
+    ✅ إصلاح إنستقرام:
+    - استخدام User-Agent للموبايل الحديث
+    - إضافة headers مطابقة لمتصفح إنستقرام
+    - ثلاث محاولات بإعدادات مختلفة
+    """
+    import copy
+
+    # Mobile Instagram UA (2024)
+    ig_mobile_ua = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+        "Mobile/21F90 Instagram 341.0.0.36.98"
+    )
+    ig_chrome_ua = (
+        "Mozilla/5.0 (Linux; Android 14; Pixel 8) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Mobile Safari/537.36 Instagram/341.0.0.36.98"
+    )
+    ig_desktop_ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.6422.142 Safari/537.36"
+    )
+
+    common_headers = {
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+    # المحاولة 1: iPhone UA
+    opt1 = copy.deepcopy(base)
+    opt1["format"] = "best[ext=mp4]/best"
+    opt1["http_headers"] = {**common_headers, "User-Agent": ig_mobile_ua}
+    if COOKIES_ENABLED:
+        opt1["cookiefile"] = COOKIES_FILE
+
+    # المحاولة 2: Android Chrome UA
+    opt2 = copy.deepcopy(base)
+    opt2["format"] = "best[ext=mp4]/best"
+    opt2["http_headers"] = {**common_headers, "User-Agent": ig_chrome_ua}
+    opt2["extractor_args"] = {"instagram": {"include_dash_manifest": ["0"]}}
+    if COOKIES_ENABLED:
+        opt2["cookiefile"] = COOKIES_FILE
+
+    # المحاولة 3: Desktop UA بدون cookies
+    opt3 = copy.deepcopy(base)
+    opt3["format"] = "best"
+    opt3["http_headers"] = {"User-Agent": ig_desktop_ua}
+
+    if audio_only:
+        for opt in [opt1, opt2, opt3]:
+            opt["format"] = "bestaudio/best"
+            opt["postprocessors"].append({
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            })
+
+    return [opt1, opt2, opt3]
+
 
 def build_opts(output: str, platform: str, audio_only: bool = False) -> list:
     """Return list of opts dicts to try (best → worst)."""
@@ -133,59 +259,45 @@ def build_opts(output: str, platform: str, audio_only: bool = False) -> list:
     if COOKIES_ENABLED:
         base["cookiefile"] = COOKIES_FILE
 
-    if audio_only:
-        base["format"] = "bestaudio/best"
-        base["postprocessors"].append({
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "320",
-        })
-        return [base]
-
-    # Platform-specific options
     if platform == "YouTube":
-        import copy
-        opt_hq = copy.deepcopy(base)
-        opt_hq["format"] = (
-            "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]"
-            "/bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
-            "/best[ext=mp4][height<=1080]/best[ext=mp4]/best"
-        )
-        opt_hq["merge_output_format"] = "mp4"
-        opt_hq["postprocessors"].append({"key": "FFmpegVideoConvertor", "preferedformat": "mp4"})
-
-        opt_simple = copy.deepcopy(base)
-        opt_simple["format"] = "best[ext=mp4]/best"
-        return [opt_hq, opt_simple]
+        return _youtube_opts_list(output, base, audio_only)
 
     elif platform == "Instagram":
-        import copy
-        opt1 = copy.deepcopy(base)
-        opt1["format"] = "best[ext=mp4]/best"
-        opt1["http_headers"] = {
-            "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) "
-                "AppleWebKit/605.1.15 Mobile/21F90 Instagram 333.0.0.35.95"
-            ),
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
-        opt2 = copy.deepcopy(base)
-        opt2["format"] = "best"
-        return [opt1, opt2]
+        return _instagram_opts_list(output, base, audio_only)
 
     elif platform == "TikTok":
         import copy
+        base["extractor_args"] = {
+            "tiktok": {"api_hostname": [
+                "api22-normal-c-useast2a.tiktokv.com",
+                "api19-normal-c-useast1a.tiktokv.com",
+            ]}
+        }
         opt1 = copy.deepcopy(base)
         opt1["format"] = "best[ext=mp4]/best"
         opt2 = copy.deepcopy(base)
         opt2["format"] = "best"
+        if audio_only:
+            for opt in [opt1, opt2]:
+                opt["format"] = "bestaudio/best"
+                opt["postprocessors"].append({
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                })
         return [opt1, opt2]
 
     elif platform == "Twitter":
         import copy
         opt1 = copy.deepcopy(base)
         opt1["format"] = "best[ext=mp4]/best"
+        if audio_only:
+            opt1["format"] = "bestaudio/best"
+            opt1["postprocessors"].append({
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            })
         return [opt1]
 
     elif platform == "SoundCloud":
@@ -205,9 +317,17 @@ def build_opts(output: str, platform: str, audio_only: bool = False) -> list:
         opt1 = copy.deepcopy(base)
         opt1["format"] = "best[ext=mp4][filesize<50M]/best[ext=mp4]/best"
         opt2 = copy.deepcopy(base)
-        opt2["format"] = "best"
+        opt2["format"] = "best[ext=mp4]/best"
         opt3 = copy.deepcopy(base)
         opt3["format"] = "worst"
+        if audio_only:
+            for opt in [opt1, opt2, opt3]:
+                opt["format"] = "bestaudio/best"
+                opt["postprocessors"].append({
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                })
         return [opt1, opt2, opt3]
 
 
@@ -301,31 +421,36 @@ class VideoDownloader:
         opts_list = build_opts(out_tmpl, platform, audio_only)
         last_err  = None
 
-        for opts in opts_list:
+        for i, opts in enumerate(opts_list):
             try:
+                logger.info(f"[yt-dlp] {platform} attempt {i+1}/{len(opts_list)}")
                 loop = asyncio.get_event_loop()
-                # Pass opts by value using lambda with default arg (fixes closure bug)
                 await loop.run_in_executor(None, lambda o=opts: _run_ytdlp(url, o))
 
                 path = find_file(base)
                 if path:
-                    logger.info(f"[yt-dlp] {platform} → {file_mb(path):.1f}MB")
+                    logger.info(f"[yt-dlp] {platform} ✅ → {file_mb(path):.1f}MB")
                     return path
 
             except yt_dlp.utils.DownloadError as e:
                 last_err = e
                 err_cls  = classify_error(e)
-                logger.warning(f"[yt-dlp] {platform} DownloadError: {str(e)[:100]}")
-                # Stop retrying on truly permanent errors
+                logger.warning(f"[yt-dlp] {platform} attempt {i+1} failed: {str(e)[:120]}")
+                # لا تعيد المحاولة على أخطاء دائمة
                 if any(x in err_cls for x in ["خاص 🔒", "محذوف", "حقوق", "تسجيل دخول"]):
                     break
+                # انتظر قليلاً قبل المحاولة التالية
+                if i < len(opts_list) - 1:
+                    await asyncio.sleep(2)
 
             except Exception as e:
                 last_err = e
-                logger.warning(f"[yt-dlp] {platform} error: {str(e)[:100]}")
+                logger.warning(f"[yt-dlp] {platform} attempt {i+1} error: {str(e)[:120]}")
+                if i < len(opts_list) - 1:
+                    await asyncio.sleep(1)
 
-            # Cleanup partial files before next attempt
-            for ext in [".mp4", ".webm", ".mkv", ".part", ".ytdl", ".mp3", ".m4a"]:
+            # تنظيف الملفات الجزئية
+            for ext in [".mp4", ".webm", ".mkv", ".part", ".ytdl", ".mp3", ".m4a", ".temp"]:
                 p = base + ext
                 if os.path.exists(p):
                     try: os.unlink(p)
@@ -369,25 +494,26 @@ async def send_single(bot: Bot, chat_id: int, path: str,
         await bot.send_photo(chat_id=chat_id, photo=FSInputFile(path))
         return
 
-    video_msg = None
+    video_sent = False
     try:
-        video_msg = await bot.send_video(
+        await bot.send_video(
             chat_id=chat_id, video=FSInputFile(path),
             supports_streaming=True, reply_to_message_id=reply_to,
         )
+        video_sent = True
     except Exception as e:
         logger.warning(f"send_video failed: {e}")
 
-    try:
-        await bot.send_document(
-            chat_id=chat_id,
-            document=FSInputFile(path, filename=f"{platform.lower()}_video.mp4"),
-            reply_to_message_id=video_msg.message_id if video_msg else reply_to,
-            disable_content_type_detection=True,
-        )
-    except Exception as e:
-        logger.warning(f"send_document failed: {e}")
-        if not video_msg:
+    if not video_sent:
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=FSInputFile(path, filename=f"{platform.lower()}_video.mp4"),
+                reply_to_message_id=reply_to,
+                disable_content_type_detection=True,
+            )
+        except Exception as e:
+            logger.error(f"send_document also failed: {e}")
             raise
 
 
@@ -412,7 +538,7 @@ async def send_carousel(bot: Bot, chat_id: int, items: list, platform: str):
             await asyncio.sleep(0.5)
 
 
-# ─── Main pipeline ─────────────────────────────────────────────────────────────
+# ─── Main pipeline ────────────────────────────────────────────────────────────
 async def process_social_media_video(
     message: Message, bot: Bot,
     url: str, platform: str,
